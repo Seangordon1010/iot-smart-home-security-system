@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This directory will contain the locally hosted Node.js backend for the IoT smart-home security system.
+This folder will contain the locally hosted Node.js backend for the IoT smart-home security system.
 
 ## Planned Responsibilities
 
