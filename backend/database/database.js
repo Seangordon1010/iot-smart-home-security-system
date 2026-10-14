@@ -1,6 +1,10 @@
-const Database = require("better-sqlite3");
+const Database = require('better-sqlite3');
+const path = require('path');
 
-const db = new Database("database/smart_home.db");
+const databasePath = path.join(__dirname, 'smart_home.db');
+const db = new Database(databasePath);
+
+db.pragma('journal_mode = WAL');
 
 db.exec(`
     CREATE TABLE IF NOT EXISTS events (
@@ -9,10 +13,16 @@ db.exec(`
         event_type TEXT NOT NULL,
         timestamp TEXT NOT NULL,
         image_path TEXT,
-        status TEXT
-    )
-`);
+        status TEXT NOT NULL DEFAULT 'new'
+    );
 
-console.log("SQLite database connected.");
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+        email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+        password_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+`);
 
 module.exports = db;
