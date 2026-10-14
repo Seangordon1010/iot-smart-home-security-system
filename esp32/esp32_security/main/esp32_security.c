@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+#include <sys/time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -9,14 +11,17 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "esp_sntp.h"
 #include "nvs_flash.h"
 #include "esp_camera.h"
 #include "esp_http_client.h"
 
+#include "device_config.h"
+
 #define WIFI_SSID "-----" //removed for privacy
 #define WIFI_PASSWORD "-----" //removed for privacy
 
-#define SERVER_URL "http://10.0.0.244:3000/api/events"
+#define SERVER_URL "http://10.0.0.244:3000/api/device/events"
 
 #define PWDN_GPIO_NUM -1
 #define RESET_GPIO_NUM -1
@@ -50,26 +55,24 @@ static void wifi_event_handler(
     int32_t event_id,
     void *event_data)
 {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
+    if (event_base == WIFI_EVENT &&
+        event_id == WIFI_EVENT_STA_START)
     {
         esp_wifi_connect();
     }
-    else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
+    else if (event_base == WIFI_EVENT &&
+             event_id == WIFI_EVENT_STA_DISCONNECTED)
     {
-        wifi_event_sta_disconnected_t *event =
-            (wifi_event_sta_disconnected_t *)event_data;
+        xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
 
-        ESP_LOGW(
-            TAG,
-            "Wi-Fi disconnected. Reason: %d",
-            event->reason
-        );
-
+        ESP_LOGW(TAG, "Wi-Fi disconnected. Reconnecting...");
         esp_wifi_connect();
     }
-    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+    else if (event_base == IP_EVENT &&
+             event_id == IP_EVENT_STA_GOT_IP)
     {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ip_event_got_ip_t *event =
+            (ip_event_got_ip_t *)event_data;
 
         ESP_LOGI(
             TAG,
@@ -91,14 +94,13 @@ static void wifi_init(void)
     esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
     ESP_ERROR_CHECK(
         esp_event_handler_register(
             WIFI_EVENT,
             ESP_EVENT_ANY_ID,
-            &wifi_event_handler,
+            wifi_event_handler,
             NULL
         )
     );
@@ -107,7 +109,7 @@ static void wifi_init(void)
         esp_event_handler_register(
             IP_EVENT,
             IP_EVENT_STA_GOT_IP,
-            &wifi_event_handler,
+            wifi_event_handler,
             NULL
         )
     );
@@ -122,10 +124,7 @@ static void wifi_init(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 
     ESP_ERROR_CHECK(
-        esp_wifi_set_config(
-            WIFI_IF_STA,
-            &wifi_config
-        )
+        esp_wifi_set_config(WIFI_IF_STA, &wifi_config)
     );
 
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -141,21 +140,75 @@ static void wifi_init(void)
     );
 }
 
+static void initialize_time(void)
+{
+    ESP_LOGI(TAG, "Synchronizing time using NTP...");
+
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
+
+    time_t now = 0;
+    struct tm time_info = {0};
+
+    int attempts = 0;
+
+    while (time_info.tm_year < (2024 - 1900) &&
+           attempts < 20)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        time(&now);
+        localtime_r(&now, &time_info);
+
+        attempts++;
+    }
+
+    if (time_info.tm_year >= (2024 - 1900))
+    {
+        ESP_LOGI(TAG, "System time synchronized.");
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Time synchronization failed.");
+    }
+}
+
 static void send_event_to_backend(void)
 {
-    const char *post_data =
+    time_t now;
+    struct tm time_info;
+    char timestamp[32];
+
+    time(&now);
+    gmtime_r(&now, &time_info);
+
+    strftime(
+        timestamp,
+        sizeof(timestamp),
+        "%Y-%m-%dT%H:%M:%SZ",
+        &time_info
+    );
+
+    char post_data[256];
+
+    snprintf(
+        post_data,
+        sizeof(post_data),
         "{"
         "\"device_id\":\"ESP32-S3-EYE\","
-        "\"event_type\":\"motion_detected\","
-        "\"timestamp\":\"2026-10-07T20:00:00\","
-        "\"image_path\":\"images/esp32_test.jpg\","
+        "\"event_type\":\"camera_capture\","
+        "\"timestamp\":\"%s\","
+        "\"image_path\":null,"
         "\"status\":\"new\""
-        "}";
+        "}",
+        timestamp
+    );
 
     esp_http_client_config_t config = {
         .url = SERVER_URL,
         .method = HTTP_METHOD_POST,
-        .timeout_ms = 5000
+        .timeout_ms = 10000
     };
 
     esp_http_client_handle_t client =
@@ -173,13 +226,19 @@ static void send_event_to_backend(void)
         "application/json"
     );
 
+    esp_http_client_set_header(
+        client,
+        "X-Device-Key",
+        DEVICE_API_KEY
+    );
+
     esp_http_client_set_post_field(
         client,
         post_data,
         strlen(post_data)
     );
 
-    ESP_LOGI(TAG, "Sending event to backend...");
+    ESP_LOGI(TAG, "Sending authenticated event to backend...");
 
     esp_err_t result = esp_http_client_perform(client);
 
@@ -187,11 +246,18 @@ static void send_event_to_backend(void)
     {
         int status_code = esp_http_client_get_status_code(client);
 
-        ESP_LOGI(
-            TAG,
-            "Backend response status: %d",
-            status_code
-        );
+        if (status_code == 201)
+        {
+            ESP_LOGI(TAG, "Event successfully saved by backend.");
+        }
+        else
+        {
+            ESP_LOGE(
+                TAG,
+                "Backend returned HTTP status: %d",
+                status_code
+            );
+        }
     }
     else
     {
@@ -219,11 +285,13 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
 
     wifi_init();
+    initialize_time();
 
     camera_config_t camera_config = {
         .pin_pwdn = PWDN_GPIO_NUM,
         .pin_reset = RESET_GPIO_NUM,
         .pin_xclk = XCLK_GPIO_NUM,
+
         .pin_sccb_sda = SIOD_GPIO_NUM,
         .pin_sccb_scl = SIOC_GPIO_NUM,
 
@@ -253,14 +321,14 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Initializing camera...");
 
-    esp_err_t result = esp_camera_init(&camera_config);
+    esp_err_t camera_result = esp_camera_init(&camera_config);
 
-    if (result != ESP_OK)
+    if (camera_result != ESP_OK)
     {
         ESP_LOGE(
             TAG,
             "Camera initialization failed: %s",
-            esp_err_to_name(result)
+            esp_err_to_name(camera_result)
         );
 
         return;
@@ -290,7 +358,15 @@ void app_main(void)
 
             esp_camera_fb_return(frame);
 
-            send_event_to_backend();
+            if (xEventGroupGetBits(wifi_event_group) &
+                WIFI_CONNECTED_BIT)
+            {
+                send_event_to_backend();
+            }
+            else
+            {
+                ESP_LOGW(TAG, "Wi-Fi unavailable; event not sent.");
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(10000));
