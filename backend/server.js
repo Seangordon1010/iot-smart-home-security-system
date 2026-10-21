@@ -5,12 +5,17 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
 const db = require('./database/database');
 
 const app = express();
 const PORT = 3000;
 const JWT_SECRET = process.env.JWT_SECRET;
 const DEVICE_API_KEY = process.env.DEVICE_API_KEY;
+const IMAGE_DIRECTORY = path.join(__dirname, 'uploads');
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
 
 if (!JWT_SECRET) {
     throw new Error('JWT_SECRET is missing. Add it to the backend .env file.');
@@ -19,6 +24,8 @@ if (!JWT_SECRET) {
 if (!DEVICE_API_KEY) {
     throw new Error('DEVICE_API_KEY is missing. Add it to the backend .env file.');
 }
+
+fs.mkdirSync(IMAGE_DIRECTORY, { recursive: true });
 
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
@@ -30,6 +37,194 @@ app.use((req, res, next) => {
 
     next();
 });
+
+const imageStorage = multer.diskStorage({
+    destination: (req, file, callback) => {
+        callback(null, IMAGE_DIRECTORY);
+    },
+    filename: (req, file, callback) => {
+        callback(null, `${crypto.randomUUID()}.jpg`);
+    }
+});
+
+const imageUpload = multer({
+    storage: imageStorage,
+    limits: {
+        fileSize: MAX_IMAGE_SIZE,
+        files: 1
+    },
+    fileFilter: (req, file, callback) => {
+        if (file.mimetype !== 'image/jpeg') {
+            return callback(new Error('Only JPEG images are allowed.'));
+        }
+
+        callback(null, true);
+    }
+});
+
+function deleteUploadedFile(file) {
+    if (file && file.path) {
+        fs.unlink(file.path, (error) => {
+            if (error && error.code !== 'ENOENT') {
+                console.error('Failed to remove uploaded file:', error);
+            }
+        });
+    }
+}
+
+function authenticateToken(req, res, next) {
+    const authorization = req.headers.authorization;
+
+    if (!authorization || !authorization.startsWith('Bearer ')) {
+        return res.status(401).json({
+            message: 'Authentication token is required.'
+        });
+    }
+
+    const token = authorization.slice(7);
+
+    jwt.verify(token, JWT_SECRET, (error, user) => {
+        if (error) {
+            return res.status(401).json({
+                message: 'Invalid or expired authentication token.'
+            });
+        }
+
+        req.user = user;
+        next();
+    });
+}
+
+function authenticateDevice(req, res, next) {
+    const suppliedKey = req.get('X-Device-Key');
+
+    if (typeof suppliedKey !== 'string') {
+        return res.status(401).json({
+            message: 'Device authentication is required.'
+        });
+    }
+
+    const suppliedBuffer = Buffer.from(suppliedKey);
+    const expectedBuffer = Buffer.from(DEVICE_API_KEY);
+
+    if (
+        suppliedBuffer.length !== expectedBuffer.length ||
+        !crypto.timingSafeEqual(suppliedBuffer, expectedBuffer)
+    ) {
+        return res.status(401).json({
+            message: 'Invalid device API key.'
+        });
+    }
+
+    next();
+}
+
+function validTimestamp(timestamp) {
+    return typeof timestamp === 'string' &&
+        !Number.isNaN(Date.parse(timestamp));
+}
+
+function saveEvent(req, res) {
+    const {
+        device_id,
+        event_type,
+        timestamp,
+        image_path,
+        status
+    } = req.body;
+
+    if (
+        typeof device_id !== 'string' ||
+        !device_id.trim() ||
+        typeof event_type !== 'string' ||
+        !event_type.trim()
+    ) {
+        return res.status(400).json({
+            message: 'device_id and event_type are required.'
+        });
+    }
+
+    const eventTimestamp = timestamp ?? new Date().toISOString();
+    const eventStatus = status ?? 'new';
+
+    if (!validTimestamp(eventTimestamp)) {
+        return res.status(400).json({
+            message: 'timestamp must be a valid date and time.'
+        });
+    }
+
+    if (
+        typeof eventStatus !== 'string' ||
+        !eventStatus.trim()
+    ) {
+        return res.status(400).json({
+            message: 'status must be a non-empty string.'
+        });
+    }
+
+    if (
+        image_path !== undefined &&
+        image_path !== null &&
+        typeof image_path !== 'string'
+    ) {
+        return res.status(400).json({
+            message: 'image_path must be a string or null.'
+        });
+    }
+
+    try {
+        const result = db.prepare(`
+            INSERT INTO events (
+                device_id,
+                event_type,
+                timestamp,
+                image_path,
+                status
+            )
+            VALUES (?, ?, ?, ?, ?)
+        `).run(
+            device_id.trim(),
+            event_type.trim(),
+            eventTimestamp,
+            image_path ?? null,
+            eventStatus.trim()
+        );
+
+        const newEvent = db.prepare(
+            'SELECT * FROM events WHERE id = ?'
+        ).get(result.lastInsertRowid);
+
+        console.log(`Event saved: ID ${newEvent.id}`);
+
+        return res.status(201).json(newEvent);
+    } catch (error) {
+        console.error('Failed to save event:', error);
+
+        return res.status(500).json({
+            message: 'Failed to save event.'
+        });
+    }
+}
+
+function handleImageUpload(req, res, next) {
+    imageUpload.single('image')(req, res, (error) => {
+        if (error) {
+            if (error instanceof multer.MulterError) {
+                const message = error.code === 'LIMIT_FILE_SIZE'
+                    ? 'Image must be 5 MB or smaller.'
+                    : 'Image upload failed. Upload one JPEG image at a time.';
+
+                return res.status(400).json({ message });
+            }
+
+            return res.status(400).json({
+                message: error.message || 'Image upload failed.'
+            });
+        }
+
+        next();
+    });
+}
 
 app.get('/', (req, res) => {
     res.json({
@@ -198,145 +393,6 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-function authenticateToken(req, res, next) {
-    const authorization = req.headers.authorization;
-
-    if (!authorization || !authorization.startsWith('Bearer ')) {
-        return res.status(401).json({
-            message: 'Authentication token is required.'
-        });
-    }
-
-    const token = authorization.slice(7);
-
-    jwt.verify(token, JWT_SECRET, (error, user) => {
-        if (error) {
-            return res.status(401).json({
-                message: 'Invalid or expired authentication token.'
-            });
-        }
-
-        req.user = user;
-        next();
-    });
-}
-
-function authenticateDevice(req, res, next) {
-    const suppliedKey = req.get('X-Device-Key');
-
-    if (typeof suppliedKey !== 'string') {
-        console.log('Device authentication failed: key header missing.');
-
-        return res.status(401).json({
-            message: 'Device authentication is required.'
-        });
-    }
-
-    const suppliedBuffer = Buffer.from(suppliedKey);
-    const expectedBuffer = Buffer.from(DEVICE_API_KEY);
-
-    if (
-        suppliedBuffer.length !== expectedBuffer.length ||
-        !crypto.timingSafeEqual(suppliedBuffer, expectedBuffer)
-    ) {
-        console.log('Device authentication failed: invalid key.');
-
-        return res.status(401).json({
-            message: 'Invalid device API key.'
-        });
-    }
-
-    console.log('Device authentication successful.');
-    next();
-}
-
-function saveEvent(req, res) {
-    const {
-        device_id,
-        event_type,
-        timestamp,
-        image_path,
-        status
-    } = req.body;
-
-    if (
-        typeof device_id !== 'string' ||
-        !device_id.trim() ||
-        typeof event_type !== 'string' ||
-        !event_type.trim()
-    ) {
-        return res.status(400).json({
-            message: 'device_id and event_type are required.'
-        });
-    }
-
-    const eventTimestamp = timestamp ?? new Date().toISOString();
-    const eventStatus = status ?? 'new';
-
-    if (
-        typeof eventTimestamp !== 'string' ||
-        Number.isNaN(Date.parse(eventTimestamp))
-    ) {
-        return res.status(400).json({
-            message: 'timestamp must be a valid date and time.'
-        });
-    }
-
-    if (
-        typeof eventStatus !== 'string' ||
-        !eventStatus.trim()
-    ) {
-        return res.status(400).json({
-            message: 'status must be a non-empty string.'
-        });
-    }
-
-    if (
-        image_path !== undefined &&
-        image_path !== null &&
-        typeof image_path !== 'string'
-    ) {
-        return res.status(400).json({
-            message: 'image_path must be a string or null.'
-        });
-    }
-
-    try {
-        const result = db.prepare(`
-            INSERT INTO events (
-                device_id,
-                event_type,
-                timestamp,
-                image_path,
-                status
-            )
-            VALUES (?, ?, ?, ?, ?)
-        `).run(
-            device_id.trim(),
-            event_type.trim(),
-            eventTimestamp,
-            image_path ?? null,
-            eventStatus.trim()
-        );
-
-        const newEvent = db.prepare(
-            'SELECT * FROM events WHERE id = ?'
-        ).get(result.lastInsertRowid);
-
-        console.log(
-            `Event saved: ID ${newEvent.id}, device ${newEvent.device_id}, type ${newEvent.event_type}`
-        );
-
-        return res.status(201).json(newEvent);
-    } catch (error) {
-        console.error('Failed to save event:', error);
-
-        return res.status(500).json({
-            message: 'Failed to save event.'
-        });
-    }
-}
-
 app.get('/api/events', authenticateToken, (req, res) => {
     try {
         const events = db.prepare(`
@@ -385,6 +441,55 @@ app.get('/api/events/:id', authenticateToken, (req, res) => {
     }
 });
 
+app.get('/api/events/:id/image', authenticateToken, (req, res) => {
+    const eventId = Number(req.params.id);
+
+    if (!Number.isSafeInteger(eventId) || eventId < 1) {
+        return res.status(400).json({
+            message: 'Invalid event ID.'
+        });
+    }
+
+    try {
+        const event = db.prepare(
+            'SELECT image_path FROM events WHERE id = ?'
+        ).get(eventId);
+
+        if (!event) {
+            return res.status(404).json({
+                message: 'Event not found.'
+            });
+        }
+
+        if (!event.image_path) {
+            return res.status(404).json({
+                message: 'This event does not have an image.'
+            });
+        }
+
+        const filename = path.basename(event.image_path);
+        const imagePath = path.join(IMAGE_DIRECTORY, filename);
+
+        if (
+            filename !== event.image_path ||
+            !fs.existsSync(imagePath)
+        ) {
+            return res.status(404).json({
+                message: 'Image file not found.'
+            });
+        }
+
+        res.type('image/jpeg');
+        res.sendFile(imagePath);
+    } catch (error) {
+        console.error('Image retrieval error:', error);
+
+        res.status(500).json({
+            message: 'Failed to retrieve image.'
+        });
+    }
+});
+
 app.post('/api/events', authenticateToken, (req, res) => {
     saveEvent(req, res);
 });
@@ -393,6 +498,191 @@ app.post('/api/device/events', authenticateDevice, (req, res) => {
     saveEvent(req, res);
 });
 
+app.post(
+    '/api/device/events/image',
+    authenticateDevice,
+    handleImageUpload,
+    (req, res) => {
+        if (!req.file) {
+            return res.status(400).json({
+                message: 'A JPEG image in the image field is required.'
+            });
+        }
+
+        const {
+            device_id,
+            event_type,
+            timestamp,
+            status
+        } = req.body;
+
+        if (
+            typeof device_id !== 'string' ||
+            !device_id.trim() ||
+            typeof event_type !== 'string' ||
+            !event_type.trim()
+        ) {
+            deleteUploadedFile(req.file);
+
+            return res.status(400).json({
+                message: 'device_id and event_type are required.'
+            });
+        }
+
+        const eventTimestamp = timestamp ?? new Date().toISOString();
+        const eventStatus = status ?? 'new';
+
+        if (!validTimestamp(eventTimestamp)) {
+            deleteUploadedFile(req.file);
+
+            return res.status(400).json({
+                message: 'timestamp must be a valid date and time.'
+            });
+        }
+
+        if (
+            typeof eventStatus !== 'string' ||
+            !eventStatus.trim()
+        ) {
+            deleteUploadedFile(req.file);
+
+            return res.status(400).json({
+                message: 'status must be a non-empty string.'
+            });
+        }
+
+        try {
+            const result = db.prepare(`
+                INSERT INTO events (
+                    device_id,
+                    event_type,
+                    timestamp,
+                    image_path,
+                    status
+                )
+                VALUES (?, ?, ?, ?, ?)
+            `).run(
+                device_id.trim(),
+                event_type.trim(),
+                eventTimestamp,
+                req.file.filename,
+                eventStatus.trim()
+            );
+
+            const event = db.prepare(
+                'SELECT * FROM events WHERE id = ?'
+            ).get(result.lastInsertRowid);
+
+            res.status(201).json({
+                message: 'Event and image saved successfully.',
+                event,
+                image_url: `/api/events/${event.id}/image`
+            });
+        } catch (error) {
+            deleteUploadedFile(req.file);
+            console.error('Failed to save event image:', error);
+
+            res.status(500).json({
+                message: 'Failed to save event and image.'
+            });
+        }
+    }
+);
+
+app.post(
+    '/api/events/:id/image',
+    authenticateToken,
+    handleImageUpload,
+    (req, res) => {
+        const eventId = Number(req.params.id);
+
+        if (!Number.isSafeInteger(eventId) || eventId < 1) {
+            deleteUploadedFile(req.file);
+
+            return res.status(400).json({
+                message: 'Invalid event ID.'
+            });
+        }
+
+        if (!req.file) {
+            return res.status(400).json({
+                message: 'A JPEG image in the image field is required.'
+            });
+        }
+
+        try {
+            const event = db.prepare(
+                'SELECT * FROM events WHERE id = ?'
+            ).get(eventId);
+
+            if (!event) {
+                deleteUploadedFile(req.file);
+
+                return res.status(404).json({
+                    message: 'Event not found.'
+                });
+            }
+
+            const update = db.prepare(`
+                UPDATE events
+                SET image_path = ?
+                WHERE id = ?
+            `).run(req.file.filename, eventId);
+
+            if (update.changes !== 1) {
+                deleteUploadedFile(req.file);
+
+                return res.status(500).json({
+                    message: 'Failed to associate image with event.'
+                });
+            }
+
+            if (event.image_path) {
+                const oldFilename = path.basename(event.image_path);
+                const oldPath = path.join(IMAGE_DIRECTORY, oldFilename);
+
+                if (
+                    oldFilename === event.image_path &&
+                    oldFilename !== req.file.filename
+                ) {
+                    deleteUploadedFile({ path: oldPath });
+                }
+            }
+
+            const updatedEvent = db.prepare(
+                'SELECT * FROM events WHERE id = ?'
+            ).get(eventId);
+
+            res.json({
+                message: 'Image associated with event successfully.',
+                event: updatedEvent,
+                image_url: `/api/events/${eventId}/image`
+            });
+        } catch (error) {
+            deleteUploadedFile(req.file);
+            console.error('Failed to associate image:', error);
+
+            res.status(500).json({
+                message: 'Failed to associate image with event.'
+            });
+        }
+    }
+);
+
+app.use((error, req, res, next) => {
+    console.error('Unexpected server error:', error);
+
+    if (res.headersSent) {
+        return next(error);
+    }
+
+    res.status(500).json({
+        message: 'An unexpected server error occurred.'
+    });
+});
+
 app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on port ${PORT}`);
+});
     console.log(`Server running on port ${PORT}`);
 });
