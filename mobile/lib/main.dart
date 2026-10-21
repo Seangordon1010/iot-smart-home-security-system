@@ -203,7 +203,6 @@ class _LoginPageState extends State<LoginPage> {
                                     value.trim().isEmpty) {
                                   return 'Please enter your username or email.';
                                 }
-
                                 return null;
                               },
                             ),
@@ -243,7 +242,6 @@ class _LoginPageState extends State<LoginPage> {
                                 if (value == null || value.isEmpty) {
                                   return 'Please enter your password.';
                                 }
-
                                 return null;
                               },
                             ),
@@ -260,8 +258,7 @@ class _LoginPageState extends State<LoginPage> {
                             SizedBox(
                               height: 50,
                               child: FilledButton(
-                                onPressed:
-                                    _isLoggingIn ? null : _login,
+                                onPressed: _isLoggingIn ? null : _login,
                                 child: _isLoggingIn
                                     ? const SizedBox(
                                         width: 22,
@@ -390,24 +387,12 @@ class _SecurityHomePageState extends State<SecurityHomePage> {
       ).toLocal();
 
       final monthNames = [
-        'Jan',
-        'Feb',
-        'Mar',
-        'Apr',
-        'May',
-        'Jun',
-        'Jul',
-        'Aug',
-        'Sep',
-        'Oct',
-        'Nov',
-        'Dec',
+        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
       ];
 
-      final hour = dateTime.hour % 12 == 0
-          ? 12
-          : dateTime.hour % 12;
-
+      final hour =
+          dateTime.hour % 12 == 0 ? 12 : dateTime.hour % 12;
       final minute = dateTime.minute.toString().padLeft(2, '0');
       final period = dateTime.hour >= 12 ? 'PM' : 'AM';
 
@@ -425,6 +410,7 @@ class _SecurityHomePageState extends State<SecurityHomePage> {
       MaterialPageRoute(
         builder: (context) => EventDetailsPage(
           event: event,
+          token: widget.token,
         ),
       ),
     );
@@ -546,10 +532,12 @@ class _SecurityHomePageState extends State<SecurityHomePage> {
 
 class EventDetailsPage extends StatelessWidget {
   final Map<String, dynamic> event;
+  final String token;
 
   const EventDetailsPage({
     super.key,
     required this.event,
+    required this.token,
   });
 
   String formatTimestamp(dynamic timestamp) {
@@ -563,24 +551,12 @@ class EventDetailsPage extends StatelessWidget {
       ).toLocal();
 
       final monthNames = [
-        'Jan',
-        'Feb',
-        'Mar',
-        'Apr',
-        'May',
-        'Jun',
-        'Jul',
-        'Aug',
-        'Sep',
-        'Oct',
-        'Nov',
-        'Dec',
+        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
       ];
 
-      final hour = dateTime.hour % 12 == 0
-          ? 12
-          : dateTime.hour % 12;
-
+      final hour =
+          dateTime.hour % 12 == 0 ? 12 : dateTime.hour % 12;
       final minute = dateTime.minute.toString().padLeft(2, '0');
       final period = dateTime.hour >= 12 ? 'PM' : 'AM';
 
@@ -631,6 +607,97 @@ class EventDetailsPage extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildCapturedImage(
+    BuildContext context,
+    String eventId,
+    String? imagePath,
+  ) {
+    if (imagePath == null || imagePath.isEmpty) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Column(
+          children: [
+            Icon(
+              Icons.no_photography_outlined,
+              size: 48,
+              color: Colors.grey,
+            ),
+            SizedBox(height: 12),
+            Text(
+              'No image has been uploaded for this event yet.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.black54),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: Image.network(
+        'http://localhost:3000/api/events/$eventId/image',
+        headers: {
+          'Authorization': 'Bearer $token',
+        },
+        fit: BoxFit.contain,
+        loadingBuilder: (context, child, loadingProgress) {
+          if (loadingProgress == null) {
+            return child;
+          }
+
+          final expectedBytes = loadingProgress.expectedTotalBytes;
+          final loadedBytes = loadingProgress.cumulativeBytesLoaded;
+
+          return Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(40),
+            color: Colors.grey.shade100,
+            child: Column(
+              children: [
+                CircularProgressIndicator(
+                  value: expectedBytes != null
+                      ? loadedBytes / expectedBytes
+                      : null,
+                ),
+                const SizedBox(height: 12),
+                const Text('Loading captured image...'),
+              ],
+            ),
+          );
+        },
+        errorBuilder: (context, error, stackTrace) {
+          return Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(24),
+            color: Colors.grey.shade100,
+            child: const Column(
+              children: [
+                Icon(
+                  Icons.broken_image_outlined,
+                  size: 48,
+                  color: Colors.grey,
+                ),
+                SizedBox(height: 12),
+                Text(
+                  'The image could not be loaded. '
+                  'It may be unavailable for this event.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.black54),
+                ),
+              ],
+            ),
+          );
+        },
       ),
     );
   }
@@ -710,11 +777,7 @@ class EventDetailsPage extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  _buildDetailRow(
-                    'Event ID',
-                    eventId,
-                    Icons.tag,
-                  ),
+                  _buildDetailRow('Event ID', eventId, Icons.tag),
                   const Divider(height: 1),
                   _buildDetailRow(
                     'Device',
@@ -758,35 +821,10 @@ class EventDetailsPage extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 16),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(24),
-                    decoration: BoxDecoration(
-                      color: Colors.grey.shade100,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Column(
-                      children: [
-                        Icon(
-                          imagePath != null && imagePath.isNotEmpty
-                              ? Icons.image_outlined
-                              : Icons.no_photography_outlined,
-                          size: 48,
-                          color: Colors.grey.shade600,
-                        ),
-                        const SizedBox(height: 12),
-                        Text(
-                          imagePath != null && imagePath.isNotEmpty
-                              ? 'Image path: $imagePath'
-                              : 'No image has been uploaded for this event yet.',
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: Colors.black54,
-                            fontSize: 14,
-                          ),
-                        ),
-                      ],
-                    ),
+                  _buildCapturedImage(
+                    context,
+                    eventId,
+                    imagePath,
                   ),
                 ],
               ),
@@ -795,5 +833,7 @@ class EventDetailsPage extends StatelessWidget {
         ],
       ),
     );
+  }
+}
   }
 }
